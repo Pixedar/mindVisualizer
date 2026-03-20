@@ -112,8 +112,6 @@ Place in `data/`:
 # -- hq High-quality model for better interpretations
 python -m src.main --no-rag --hq
 
-# Multi-probe with branching
-python -m src.main --no-rag --multi-probe 4 --branching
 ```
 
 ### Raw rDCIM mode
@@ -122,14 +120,9 @@ python -m src.main --no-rag --multi-probe 4 --branching
 # Interactive graph visualization
 python examples/rdcim_propagation.py --hq
 
-# High-quality model for deeper neuroscience analysis
-python examples/rdcim_propagation.py --hq
-
 # Pre-initialize global brain state
 python examples/rdcim_propagation.py --hq --global-state "someone feeling anxious"
 
-# Perturb a specific ROI
-python examples/rdcim_propagation.py --perturb 42 --perturbation "sudden fear response"
 ```
 
 > **RAG note:** I currently recommend using `--no-rag` for the flow mode. The RAG database is implemented but not yet populated with medical-grade neuroscience knowledge — this is underway. Use caution: this feature is still in a testing stage.
