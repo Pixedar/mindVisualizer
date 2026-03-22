@@ -18,6 +18,14 @@ Usage:
   # Skip RAG, use GPT's own knowledge
   python examples/flow_probe_example.py --no-rag
 
+  # High-quality model with debug (prints LLM prompts)
+  python examples/flow_probe_example.py --no-rag --hq --debug
+
+  # Extra parcellation is auto-detected if you run the setup script:
+  #   python scripts/setup_extra_parcellation.py
+  # Or provide a custom NIfTI atlas:
+  #   python examples/flow_probe_example.py --extra-parcellation my_atlas.nii.gz
+
   # State propagation mode (4 probes + branching)
   python examples/flow_probe_example.py --multi-probe 4 --branching
 

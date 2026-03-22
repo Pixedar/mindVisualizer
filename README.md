@@ -4,16 +4,18 @@ A tool for exploring how information may move through the brain at rest, using b
 
 ## What does it do?
 
-mindVisualizer has two complementary modes for looking at resting-state brain dynamics.
+mindVisualizer has three modes for looking at resting-state brain dynamics.
 
 The first is a **general information flow model** — an estimated field of how information tends to move through the brain during rest. This is based on my preprint, where **rDCIM** is combined with **anatomical geometry and streamlines** to produce a continuous flow field. In this mode, the system does not just show which regions are connected, but also gives a spatial, dynamic picture of how information may propagate through the brain.
 
 The second is a **raw rDCIM connectivity mode**. Here, the brain is represented more directly as a graph of connections between ROIs. You can think of it as a 3D graph showing how different brain regions are linked during rest through effective connectivity.
 
+The third is an **ROI flow mode** — a dual-window visualization where the left panel shows particle flow through a learned neural manifold, and the right panel shows the corresponding ROI activation pattern. As you trace a path through the manifold, the system maps each position to a brain-region activation vector using kNN interpolation, and the LLM interprets what the resulting flow pattern means.
+
 ## Flow mode
 The flow mode is designed for interactive exploration.
 
-You can press **`G`** to place a probe somewhere in the flow field. Once placed, the probe is carried by the flow itself, tracing a path through the brain as if it were “grabbed” by the underlying information dynamics.
+You can press **`G`** to place a probe somewhere in the flow field. Once placed, the probe is carried by the flow itself, tracing a path through the brain as if it were "grabbed" by the underlying information dynamics.
 
 Then, by pressing **`Shift + G`**, you can ask the LLM to explain the meaning of that exact flow trajectory. The model does this by identifying which anatomical regions the probe passed through and interpreting what that sequence of regions could mean based on neuroscience knowledge retrieved from the RAG database. In other words, it tries to explain what kind of information transfer this path may correspond to, and what functional role it could reflect in the resting brain.
 
@@ -33,18 +35,36 @@ You can then select any ROI and perturb its state. The system propagates that pe
 At the end, the LLM provides an interpretation of what this perturbation changed in the broader brain network.
 
 ![Raw rDCIM demo](assets/gifB.gif)
+
+## ROI flow mode
+
+In this mode, you explore a learned neural manifold (not the brain directly). Each position in this manifold corresponds to a particular pattern of brain region activations, derived from resting-state fMRI data.
+
+You place a probe in the manifold, let it follow the flow, and the right panel updates in real time to show which brain regions are active or suppressed at each point along the path. When you freeze the probe (`Shift+G`), the system computes the delta between start and end ROI activations and asks the LLM to interpret what this specific flow pattern means — which networks were affected, what direction the information flowed, and what cognitive process could produce it.
+
 ---
 
 ## Installation
 
 ```bash
-git clone <repo-url>
-cd mindVisualizer
+
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
+source .venv/bin/activate  # Linux/Mac
+#.venv\Scripts\activate  # Windows
+
 pip install -e .
+
+#This downloads the **Allen Human Brain Atlas** via BrainGlobe and builds cached lookup data
+pip install brainglobe-atlasapi
+python setup_brain_data.py
+
+# Extra parcellation (optional but strongly recommended - finer subregion labels in flow mode)
+python setup_brain_data.py
+
+
+
 ```
+
 
 ### API key
 
@@ -54,52 +74,28 @@ Create a `.env` file in the project root:
 OPENAI_API_KEY=sk-your-key-here
 ```
 
-By default the app uses **GPT-5.4-mini** — a fast, cost-efficient model suitable for testing. For general use and higher-quality neuroscience interpretations, pass `--hq` to switch to **GPT-5.4** (see Usage below).
-
-> **Note:** Without `--hq`, all LLM calls use **GPT-5.4-mini**. This is recommended for testing or if you want to avoid spending on expensive tokens. The `--hq` flag switches every LLM call to **GPT-5.4**, which produces significantly better neuroscience interpretations but costs more.
+By default the app uses **GPT-5.4-mini** (fast and cheap). Pass `--hq` to switch to **GPT-5.4** for higher-quality interpretations.
 
 ---
 
-## Data required
+## Data
 
-### 1) MDN flow artifact (alredy included in the repo)
+Most data is already included in the repo or generated during setup. You only need to manually manage these:
 
-Place these files in `data/mdn/`:
+### API key (`.env`)
+Required for all LLM features. See Installation above.
 
-- `mdn_particles_rdcim_teacher_edge_hq_grid125_meta.json`
-- `mdn_particles_rdcim_teacher_edge_hq_training_points.npy`
-- the 9 binary grid files referenced by the metadata JSON
+### Brain states (`data/brain_states_rdcim.json`)
+Auto-generated when you run `--global-state`. You can manually edit this JSON to set expert-level neuroscience descriptions for each ROI.
 
-This is the precomputed MDN flow artifact used for the continuous flow mode.
+### RAG knowledge base (`data/rag_knowledge/`)
+Drop JSON or TXT files here to improve LLM interpretations. The default includes 24 brain region descriptions. Add your own medical-grade knowledge to get better results. See `data/rag_knowledge/README.md` for format docs.
 
-### 2) Brain region meshes and labels
+### ROI flow data (`data/roi_flow/`)
+Download with `python scripts/download_roi_flow_data.py`. Source: [HuggingFace](https://huggingface.co/datasets/Pixedar/mindVisualizer-roi-flow-data)
 
-This project uses:
-
-- custom STL region meshes in `data/meshes/`
-- Allen Human Brain Atlas OBJ meshes in `data/meshes_obj/`
-- cached anatomical lookup data generated during setup
-
-First-time setup:
-
-```bash
-pip install brainglobe-atlasapi
-python setup_brain_data.py
-```
-
-This downloads the **Allen Human Brain Atlas** via BrainGlobe (`allen_human_500um`), prepares meshes, and builds a cached voxel label grid for fast anatomical region lookup.
-
-### 3) rDCIM graph data 
-
-Place in `data/`:
-
-- `sch400_rDCM_A.npy` — 400×400 directed effective connectivity matrix
-- `schaefer400_centroids_MNI.npy` — 400×3 ROI centroid coordinates in MNI space
-
-### 4) Other supporting files
-
-- `data/brain_alignment.json` — spatial transform / alignment matrix
-- `data/structures.json` — atlas structure name mappings
+### Extra parcellation (`data/extra_parcellation/`)
+Run `python scripts/setup_extra_parcellation.py` to build a combined atlas (127 regions from Harvard-Oxford + Julich-Brain). Auto-detected by flow mode. See `data/extra_parcellation/README.md`.
 
 ---
 
@@ -112,7 +108,7 @@ Place in `data/`:
 python -m src.main --no-rag --hq
 
 ```
-
+> **RAG note:**  For best results, add more medical-grade knowledge to `data/rag_knowledge/`. Alternatively, use `--no-rag` to skip RAG entirely and let the LLM use its own training knowledge.
 ### Raw rDCIM mode
 
 ```bash
@@ -125,30 +121,53 @@ python examples/rdcim_propagation.py --hq
 
 ```
 > **Global state note:** The `--global-state` currently is using the llm to auto fill the inital states of roi, but for best results its recommend to manually create or edit data\brain_states_rdcim.json with expert-level neuroscience descriptions for each ROI
-> **RAG note:** I currently recommend using `--no-rag` for the flow mode. The RAG database is implemented but not yet populated with medical-grade neuroscience knowledge — this is underway. Use caution: this feature is still in a testing stage.
+
+### ROI flow mode
+
+```bash
+# Download data first (one-time)
+pip install huggingface_hub
+python scripts/download_roi_flow_data.py
+
+# Run (defaults point to data/roi_flow/)
+python examples/roi_flow_mode.py
+python examples/roi_flow_mode.py --hq --debug
+```
+
+
 
 ---
 
-## Controls/ How to use the app
+## Controls
 
 ### Flow mode
-basic:
 1. **`G` + click** — place a probe in the flow field
-2. **`Shift + G`** — ask the LLM to interpret the recorded probe trajectory, keep in mind that if you use hq flag you might wait some time for response do not clear the probe until you get the response
+2. **`Shift + G`** — ask the LLM to interpret the probe trajectory
 3. **`C`** — clear all probes
-> **Note:** If you put the porbe near the surface of the brain the probe might not be picked up by the flow, try placing it a bit deeper or in strong flow regions
+Advanced:
+ **`B`** — toggle branching mode
+ **`+/-`** — speed scale
+ **`S`** — initialize brain states
+ **`Shift + S`** — propagate state changes through probe path
 
-advanced:
-- **`B`** - toogle branching mode on/off. When branching mode is on, the probe will split into multiple probes where there is flow divergence
-- **`+ or -`** - increase/decrease speed of the flow
-- **`S`** — initialize brain states
-- **`Shift + S`** — propagate state changes through the probe path
+> **Note:** Place the probe a bit deeper into the brain for best results. Near-surface placements may not be picked up by the flow.
 
 ### Raw rDCIM mode
+1. **click ROI** — select a parcel
+2. **`P`** — propose perturbations for selected ROI
+3. **`Shift + P`** — propagate perturbation through graph
 
-1. **click ROI** — select a parcel / region
-2. **`P`** — perturb the selected ROI (The app will propose you the perturbation options based on the current state of the brain and the selected ROI, but you can also write your own custom perturbation)
-3. **`Shift + P`** — one you choose a perturbation you can start propagating it through the graph by clicking shift+p
+### ROI flow mode
+1. **`G` + click** — place probe in manifold
+2. **`Shift + G`** — freeze probe, compute ROI delta, LLM interpretation
+3. **`C`** — clear probe and ROI display
+4. **`+/-`** — speed scale
+
+---
+
+## Debug mode and LLM prompts
+
+Pass `--debug` to any script to print the full LLM prompt to console before each call. Useful for tuning prompts or debugging responses.
 
 ---
 
@@ -160,7 +179,7 @@ This repository combines several public resources. If you reuse, redistribute, o
 
 The continuous flow mode is built on the MDN flow artifact released with my preprint:
 
-Continuous, Tract-Constrained Directional Vector Fields from rDCM Effective Connectivity Using Mixture Density Networks  
+Continuous, Tract-Constrained Directional Vector Fields from rDCM Effective Connectivity Using Mixture Density Networks
   Zenodo record: [https://zenodo.org/records/18200415](https://zenodo.org/records/18200415)
 
 That work describes the fusion of:
@@ -172,38 +191,30 @@ into a continuous MDN-based directional flow field.
 
 ### Effective connectivity and ROI definition
 
-The raw rDCIM graph data used here follows the same setup as the preprint:
-
 - **Schaefer et al. (2018)** — Schaefer-400 cortical parcellation
 - **Frässle et al. (2021)** — regression dynamic causal modeling (rDCM)
-- rDCIM connectivity inputs derived from publicly available resources including:
-  - **Royer et al. (2022)** — MICA-MICs
-  - **Van Essen et al. (2013)** — Human Connectome Project
+- **Royer et al. (2022)** — MICA-MICs
+- **Van Essen et al. (2013)** — Human Connectome Project
 
-In this repository, the same **rDCIM matrix family** and the same **Schaefer-400 ROI definition / centroids** are used for the direct graph mode and for compatibility with the flow artifact.
-
-### Structural geometry behind the flow artifact
-
-The structural geometry used upstream for the MDN flow generation comes from:
+### Structural geometry
 
 - **Yeh et al. (2022)** — population-based tract-to-region connectome / HCP-1065 tractography atlas
 
-### Anatomical meshes used in the app
+### Anatomical meshes
 
-For anatomical region lookup and mesh visualization, this repository uses the **Allen Human Brain Atlas** meshes through BrainGlobe:
+- **Allen Human Brain Atlas** (`allen_human_500um`) via **BrainGlobe AtlasAPI**
 
-- **Allen Human Brain Atlas** (`allen_human_500um`) via **BrainGlobe AtlasAPI** / **Allen Brain Map**
+### Extra parcellation atlases (optional)
 
-These atlas meshes are used here for visualization and anatomical labeling in the app. They are not the source of the MDN flow field itself.
+The built-in combined atlas merges Harvard-Oxford (Desikan et al., 2006) and Julich-Brain (Amunts et al., 2020) for broad cortical/subcortical coverage with cytoarchitectonic detail. Custom NIfTI atlases in MNI space are also supported.
+
 ## Limitations
 
 - **Not medical or clinical advice.** This is a research and visualization tool.
 - The flow field is a **model-based approximation**, not a direct measurement of neural signal transmission.
 - The LLM interpretations are **neuroscience-informed explanations**, not ground truth.
-- The MDN field is strongly shaped by anatomical geometry, so it should be understood as an interpretable proxy rather than a literal simulation of biological information flow.
-- Allen atlas coverage and mesh-based anatomical lookup are useful for interpretation, but they are not a replacement for task-specific neuroanatomical analysis pipelines.
-- **RAG quality is crucial.** The quality of LLM interpretations depends heavily on the RAG knowledge base. The current RAG dataset is a placeholder — it must be populated with curated, medical-grade neuroscience knowledge for best results. This work is underway.
-- **Preprint status.** The underlying research (MDN flow field construction from rDCM effective connectivity) is a preprint and has not yet undergone peer review. However, the app itself remains a valid and usable interpretability tool for human brain information flow even with different or improved MDN flow fields — if you supply a better-quality flow artifact, the visualization and analysis pipeline will still work.
+- **RAG quality matters.** Add curated medical knowledge to `data/rag_knowledge/` for better LLM interpretations.
+- **Preprint status.** The underlying research is a preprint and has not yet undergone peer review. However, the app works with any MDN flow field — if you supply a better one, everything still works.
 
 ---
 

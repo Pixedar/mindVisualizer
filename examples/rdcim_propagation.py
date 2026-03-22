@@ -145,10 +145,35 @@ def map_rois_to_regions(centroids: np.ndarray, roi_names: list[str]) -> list[str
             region_name = overlay.get_region_name(key)
             hemi = overlay.get_hemisphere_label(key, pos)
             hemi_tag = f", {hemi}" if hemi else ""
-            mapped_names.append(f"{name} ({region_name}{hemi_tag})")
+
+            # Add relative position within the region
+            center = overlay.get_mesh_center(key)
+            bounds = overlay.get_mesh_bounds(key)
+            pos_tag = ""
+            if center is not None and bounds is not None:
+                diff = pos - center
+                extent = np.array([bounds[1]-bounds[0], bounds[3]-bounds[2],
+                                   bounds[5]-bounds[4]])
+                extent = np.maximum(extent, 1e-6)
+                rel = diff / (extent * 0.5)
+                parts = []
+                if abs(rel[2]) > 0.3:
+                    parts.append("dorsal" if rel[2] > 0 else "ventral")
+                if abs(rel[0]) > 0.3:
+                    parts.append("lateral" if abs(rel[0]) > 0.5 else "medial")
+                if abs(rel[1]) > 0.3:
+                    parts.append("anterior" if rel[1] > 0 else "posterior")
+                if parts:
+                    pos_tag = f", near {' '.join(parts)} section"
+                else:
+                    pos_tag = ", near center"
+
+            mapped_names.append(f"{name} ({region_name}{hemi_tag}{pos_tag})")
             matched += 1
         else:
-            mapped_names.append(name)
+            # Still add hemisphere based on x-coordinate for unmapped ROIs
+            hemi_label = "left hemisphere" if pos[0] < 0 else "right hemisphere"
+            mapped_names.append(f"{name} ({hemi_label})")
 
     print(f"[roi-map] Mapped {matched}/{len(roi_names)} ROIs to Allen regions")
     return mapped_names
@@ -885,6 +910,12 @@ def main():
                     help="Perturbation description")
     ap.add_argument("--hq", action="store_true",
                     help="Use high-quality GPT model (gpt-5.4) instead of gpt-5.4-mini")
+    ap.add_argument("--debug", action="store_true",
+                    help="Print full LLM prompts to console before each call")
+    ap.add_argument("--extra-parcellation", type=Path, default=None,
+                    help="Path to NIfTI parcellation file for finer subregion labels")
+    ap.add_argument("--extra-parcellation-labels", type=Path, default=None,
+                    help="JSON label map for extra parcellation")
     args = ap.parse_args()
 
     model = "gpt-5.4" if args.hq else "gpt-5.4-mini"
@@ -905,7 +936,7 @@ def main():
     print("[init] Mapping ROIs to anatomical regions...")
     roi_names = map_rois_to_regions(centroids, roi_names)
 
-    brain_db = BrainStateDB(DEFAULT_STATE_FILE, model=model)
+    brain_db = BrainStateDB(DEFAULT_STATE_FILE, model=model, debug=args.debug)
 
     if args.global_state:
         print(f"[init] Initializing brain states: {args.global_state}")

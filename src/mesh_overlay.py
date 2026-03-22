@@ -129,8 +129,64 @@ class FlowMeshOverlay:
         self._bb_volumes: dict[str, float] = {}
         self._compute_volumes_and_filter()
 
+        # Optional extra parcellation (set via set_extra_parcellation)
+        self._extra = None
+
         print(f"[mesh] discovered {len(self._order)} region meshes "
               f"({len(self.keys)} OBJ)")
+
+    # ------------------------------------------------------------------
+    # extra parcellation
+    # ------------------------------------------------------------------
+
+    def set_extra_parcellation(self, extra):
+        """Attach an optional ExtraParcellation for finer subregion queries.
+
+        Args:
+            extra: ExtraParcellation instance (already loaded)
+        """
+        self._extra = extra
+
+    def get_hierarchical_regions_at_point(self, point: np.ndarray) -> dict:
+        """Return both primary (Allen) and subregion (extra parcellation) at a point.
+
+        Returns:
+            {
+                "primary": str | None,         # Allen atlas region key
+                "primary_name": str | None,    # Allen atlas region name
+                "subregion": dict | None,      # {"label_id", "name", "volume_mm3"} from extra
+                "subregion_mesh": vtkPolyData | None  # mesh if available
+            }
+        """
+        result = {
+            "primary": None,
+            "primary_name": None,
+            "subregion": None,
+            "subregion_mesh": None,
+        }
+
+        # Primary lookup (Allen atlas)
+        primary_key = self.get_region_at_point(point)
+        if primary_key is None:
+            primary_key = self.find_nearest_region(point, search_radius=2,
+                                                    max_distance_mm=5.0)
+        if primary_key:
+            result["primary"] = primary_key
+            result["primary_name"] = self.get_region_name(primary_key)
+
+        # Extra parcellation lookup
+        if self._extra is not None and self._extra.is_loaded():
+            sub = self._extra.get_region_at_point(point)
+            if sub is None:
+                sub = self._extra.get_nearby_region(point, search_radius=2)
+            if sub is not None:
+                result["subregion"] = sub
+                # Try to get mesh for highlighting
+                mesh = self._extra.get_region_mesh(sub["label_id"])
+                if mesh is not None:
+                    result["subregion_mesh"] = mesh
+
+        return result
 
     # ------------------------------------------------------------------
     # volume filtering

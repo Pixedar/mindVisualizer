@@ -1,118 +1,69 @@
 """Analyze probe trajectory through brain regions and explain transitions via GPT."""
 
+import json
 import os
 from pathlib import Path
 
 import numpy as np
 
+# Path to RAG knowledge files (JSON and TXT files with brain region descriptions)
+RAG_KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "data" / "rag_knowledge"
 
-# Brain region knowledge base for RAG
-REGION_KNOWLEDGE = {
-    "Retrosplenial Area (RSP)": (
-        "The retrosplenial cortex is involved in spatial memory, navigation, "
-        "and contextual memory. It integrates information from the hippocampus "
-        "and visual cortex to form spatial representations."
-    ),
-    "Anterior Cingulate Area (ACA)": (
-        "The anterior cingulate cortex plays roles in attention, error monitoring, "
-        "conflict detection, emotional regulation, and decision-making. It connects "
-        "limbic and prefrontal regions."
-    ),
-    "Prelimbic Area (PL)": (
-        "The prelimbic cortex is part of the medial prefrontal cortex, involved in "
-        "working memory, goal-directed behavior, fear expression, and emotional regulation."
-    ),
-    "Infralimbic Area (ILA)": (
-        "The infralimbic cortex is involved in fear extinction, autonomic regulation, "
-        "and emotional processing. It has reciprocal connections with the amygdala."
-    ),
-    "Orbital Area (ORB)": (
-        "The orbitofrontal cortex is critical for reward-based decision making, "
-        "value encoding, and behavioral flexibility. It integrates sensory and "
-        "emotional information."
-    ),
-    "Primary Somatosensory Area (SSp)": (
-        "The primary somatosensory cortex processes tactile information from the body "
-        "including touch, pressure, temperature, and pain."
-    ),
-    "Supplemental Somatosensory Area (SSs)": (
-        "The supplemental somatosensory area processes higher-order tactile information "
-        "and is involved in texture discrimination and object recognition by touch."
-    ),
-    "Primary Motor Area (MOp)": (
-        "The primary motor cortex directly controls voluntary movements by sending "
-        "signals to muscles via the corticospinal tract."
-    ),
-    "Secondary Motor Area (MOs)": (
-        "The secondary motor area (premotor cortex) is involved in movement planning, "
-        "preparation, and the selection of appropriate motor programs."
-    ),
-    "Primary Visual Area (VISp)": (
-        "The primary visual cortex (V1) processes basic visual features including "
-        "orientation, spatial frequency, and color."
-    ),
-    "Anterolateral Visual Area (VISal)": (
-        "The anterolateral visual area processes complex visual features and is part "
-        "of the ventral visual stream involved in object recognition."
-    ),
-    "Anteromedial Visual Area (VISam)": (
-        "The anteromedial visual area is part of the dorsal visual stream, involved "
-        "in spatial processing and visuospatial attention."
-    ),
-    "Posterior Parietal Association Area (PTLp)": (
-        "The posterior parietal cortex integrates sensory information for spatial "
-        "awareness, attention, and sensorimotor transformations for reaching and grasping."
-    ),
-    "Primary Auditory Area (AUDp)": (
-        "The primary auditory cortex processes basic acoustic features including "
-        "frequency, intensity, and temporal patterns of sound."
-    ),
-    "Dorsal Auditory Area (AUDd)": (
-        "The dorsal auditory area is part of the auditory 'where' pathway, "
-        "processing spatial aspects of sound localization."
-    ),
-    "Ventral Auditory Area (AUDv)": (
-        "The ventral auditory area is part of the auditory 'what' pathway, "
-        "processing sound identity and complex spectral features."
-    ),
-    "Temporal Association Area (TEa)": (
-        "The temporal association area integrates auditory and visual information "
-        "for multisensory processing and is involved in social cognition."
-    ),
-    "Perirhinal Area (PERI)": (
-        "The perirhinal cortex is critical for object recognition memory and serves "
-        "as a gateway between neocortical areas and the hippocampus."
-    ),
-    "Ectorhinal Area (ECT)": (
-        "The ectorhinal cortex is involved in the processing of contextual information "
-        "and forms part of the parahippocampal region."
-    ),
-    "Hippocampal Formation (HPF)": (
-        "The hippocampal formation is essential for episodic memory formation, "
-        "spatial navigation, and memory consolidation. It includes the hippocampus "
-        "proper, dentate gyrus, and subiculum."
-    ),
-    "Entorhinal Area (ENT)": (
-        "The entorhinal cortex is the main interface between the hippocampus and "
-        "neocortex. It contains grid cells for spatial navigation and is critical "
-        "for memory encoding."
-    ),
-    "Thalamus (TH)": (
-        "The thalamus is a major relay station for sensory and motor information. "
-        "It routes signals between subcortical areas and the cortex and plays roles "
-        "in consciousness, sleep, and alertness."
-    ),
-    "Hypothalamus (HY)": (
-        "The hypothalamus regulates homeostatic functions including body temperature, "
-        "hunger, thirst, circadian rhythms, and the autonomic nervous system. "
-        "It controls the pituitary gland."
-    ),
-    "Cerebellum (CB)": (
-        "The cerebellum coordinates voluntary movements, balance, and motor learning. "
-        "It also contributes to cognitive functions including attention and language."
-    ),
-}
 
+
+def load_knowledge_from_files(directory: Path | None = None) -> dict[str, str]:
+    """Load brain region knowledge from user-supplied JSON and TXT files.
+
+    JSON files: {"Region Name": "description", ...}
+    TXT files: sections separated by '## Region Name' headers.
+
+    Returns merged dict. Empty dict if directory missing/empty.
+    """
+    directory = directory or RAG_KNOWLEDGE_DIR
+    knowledge: dict[str, str] = {}
+    if not directory.is_dir():
+        return knowledge
+
+    # Process files in sorted order for deterministic merging
+    for fpath in sorted(directory.iterdir()):
+        if fpath.suffix == ".json":
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    count = 0
+                    for k, v in data.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            knowledge[k] = v
+                            count += 1
+                    if count:
+                        print(f"[RAG] Loaded {count} regions from {fpath.name}")
+            except Exception as e:
+                print(f"[RAG] Warning: could not load {fpath.name}: {e}")
+
+        elif fpath.suffix == ".txt":
+            try:
+                text = fpath.read_text(encoding="utf-8")
+                current_region = None
+                current_lines: list[str] = []
+                count = 0
+                for line in text.splitlines():
+                    if line.startswith("## "):
+                        if current_region and current_lines:
+                            knowledge[current_region] = " ".join(current_lines).strip()
+                            count += 1
+                        current_region = line[3:].strip()
+                        current_lines = []
+                    elif current_region is not None:
+                        current_lines.append(line.strip())
+                if current_region and current_lines:
+                    knowledge[current_region] = " ".join(current_lines).strip()
+                    count += 1
+                if count:
+                    print(f"[RAG] Loaded {count} regions from {fpath.name}")
+            except Exception as e:
+                print(f"[RAG] Warning: could not load {fpath.name}: {e}")
+
+    return knowledge
 
 
 def _call_direct_responses_api(question: str, model: str) -> str:
@@ -260,6 +211,14 @@ def analyze_probe_path(path_positions: np.ndarray, mesh_overlay,
             }
             if hemisphere is not None:
                 transition_dict["hemisphere"] = hemisphere
+
+            # Extra parcellation subregion info
+            if hasattr(mesh_overlay, '_extra') and mesh_overlay._extra is not None:
+                sub = mesh_overlay._extra.get_region_at_point(pt)
+                if sub is not None:
+                    transition_dict["subregion_name"] = sub["name"]
+                    transition_dict["subregion_volume"] = sub["volume_mm3"]
+
             transitions.append(transition_dict)
 
         # Accumulate samples for active transitions
@@ -292,6 +251,129 @@ def analyze_probe_path(path_positions: np.ndarray, mesh_overlay,
                 t["avg_flow_strength"] = float(np.mean(t["_flow_samples"]))
             if t["_ent_samples"]:
                 t["avg_entropy"] = float(np.mean(t["_ent_samples"]))
+
+    # Pre-compute sampled path points for nearby detection / enrichment
+    sampled_pts = path_positions[::sample_every]
+
+    # --- Enrich each transition with detailed interaction context ---
+    for t in transitions:
+        key = t["region_key"]
+        entry_i = t["entry_idx"]
+        exit_i = t["exit_idx"] if t["exit_idx"] is not None else len(path_positions) - 1
+
+        center = mesh_overlay.get_mesh_center(key)
+        bounds = mesh_overlay.get_mesh_bounds(key)
+
+        # Collect all path points inside this region's span
+        inside_pts = path_positions[entry_i:exit_i + 1:sample_every]
+
+        # 1. Interaction type: how deeply the probe penetrated
+        if center is not None and bounds is not None and len(inside_pts) > 0:
+            extent = np.array([bounds[1]-bounds[0], bounds[3]-bounds[2],
+                               bounds[5]-bounds[4]])
+            extent = np.maximum(extent, 1e-6)
+            char_size = float(np.mean(extent))  # characteristic region size
+
+            # Distance from each inside point to region center
+            dists_to_center = np.linalg.norm(inside_pts - center, axis=1)
+            min_dist = float(dists_to_center.min())
+            mean_dist = float(dists_to_center.mean())
+            # Normalized penetration depth (0 = at center, 1 = at edge)
+            penetration = 1.0 - min(min_dist / (char_size * 0.5), 1.0)
+
+            if penetration > 0.6:
+                interaction = "passed through center"
+            elif penetration > 0.3:
+                interaction = "traversed mid-region"
+            elif len(inside_pts) <= 2:
+                interaction = "briefly touched surface"
+            else:
+                interaction = "passed through periphery"
+            t["interaction_type"] = interaction
+            t["penetration_depth"] = round(penetration, 2)
+        else:
+            t["interaction_type"] = "traversed"
+            t["penetration_depth"] = None
+
+        # 2. Exit position (relative to region)
+        if exit_i < len(path_positions) and center is not None and bounds is not None:
+            exit_pt = path_positions[min(exit_i, len(path_positions) - 1)]
+            t["exit_position"] = _relative_position(exit_pt, center, bounds)
+        else:
+            t["exit_position"] = "unknown"
+
+        # 3. Traversal direction through the region
+        if len(inside_pts) >= 2:
+            direction_vec = inside_pts[-1] - inside_pts[0]
+            norm = np.linalg.norm(direction_vec)
+            if norm > 1e-6:
+                d = direction_vec / norm
+                dir_parts = []
+                if abs(d[2]) > 0.3:
+                    dir_parts.append("upward" if d[2] > 0 else "downward")
+                if abs(d[0]) > 0.3:
+                    dir_parts.append("rightward" if d[0] > 0 else "leftward")
+                if abs(d[1]) > 0.3:
+                    dir_parts.append("anteriorly" if d[1] > 0 else "posteriorly")
+                t["traversal_direction"] = " and ".join(dir_parts) if dir_parts else "through"
+            else:
+                t["traversal_direction"] = "stationary"
+        else:
+            t["traversal_direction"] = "brief"
+
+    # --- Detect nearby regions (probe flowed close but never entered) ---
+    entered_keys = {t["region_key"] for t in transitions}
+    NEARBY_THRESHOLD_MM = 5.0  # max distance to consider "nearby"
+    nearby_transitions = []
+
+    for key in region_keys:
+        if key in entered_keys:
+            continue
+        center = mesh_overlay.get_mesh_center(key)
+        bounds = mesh_overlay.get_mesh_bounds(key)
+        if center is None or bounds is None:
+            continue
+        extent = np.array([bounds[1]-bounds[0], bounds[3]-bounds[2],
+                           bounds[5]-bounds[4]])
+        extent = np.maximum(extent, 1e-6)
+        char_size = float(np.mean(extent))
+
+        # Check minimum distance from any sampled path point to region center
+        dists = np.linalg.norm(sampled_pts - center, axis=1)
+        min_dist = float(dists.min())
+        # "nearby" = within threshold but also within the region's own characteristic size
+        effective_radius = max(char_size * 0.5, NEARBY_THRESHOLD_MM)
+        if min_dist < effective_radius:
+            closest_idx = int(dists.argmin()) * sample_every
+            name = mesh_overlay.get_region_name(key)
+            hemisphere = None
+            if hasattr(mesh_overlay, 'get_hemisphere_label'):
+                try:
+                    hemisphere = mesh_overlay.get_hemisphere_label(
+                        key, sampled_pts[int(dists.argmin())])
+                except Exception:
+                    pass
+            nearby_t = {
+                "region_key": key,
+                "region_name": name,
+                "entry_idx": closest_idx,
+                "exit_idx": closest_idx,
+                "relative_position": _relative_position(
+                    sampled_pts[int(dists.argmin())], center, bounds),
+                "entry_point": sampled_pts[int(dists.argmin())].copy(),
+                "enclosing_regions": [],
+                "avg_flow_strength": None,
+                "avg_entropy": None,
+                "interaction_type": f"nearby (did not enter, ~{min_dist:.1f}mm away)",
+                "penetration_depth": 0.0,
+                "exit_position": "n/a",
+                "traversal_direction": "n/a",
+            }
+            if hemisphere is not None:
+                nearby_t["hemisphere"] = hemisphere
+            nearby_transitions.append(nearby_t)
+
+    transitions.extend(nearby_transitions)
 
     # Clean up internal fields
     for t in transitions:
@@ -365,11 +447,44 @@ def format_transitions_text(transitions: list[dict],
         if enclosing:
             ctx_str = f" [within larger region: {', '.join(enclosing)}]"
 
-        lines.append(
-            f"{i}. {region_label} - entered at position "
-            f"({t['relative_position']}), "
-            f"traversed for ~{duration} steps{extras_str}{ctx_str}"
-        )
+        # Extra parcellation subregion info
+        subregion = t.get("subregion_name")
+        sub_str = ""
+        if subregion:
+            sub_str = f", more specifically in subregion: {subregion}"
+
+        # Interaction detail from enrichment
+        interaction = t.get("interaction_type", "traversed")
+        is_nearby = "nearby" in interaction
+
+        if is_nearby:
+            # Nearby region: compact format, no penetration/direction/exit noise
+            entry_pos = t.get("relative_position", "unknown")
+            pos_str = f" near {entry_pos} section" if entry_pos and entry_pos != "unknown" else ""
+            lines.append(
+                f"{i}. {region_label} — {interaction}{pos_str}{ctx_str}{sub_str}"
+            )
+        else:
+            penetration = t.get("penetration_depth")
+            direction = t.get("traversal_direction", "")
+            exit_pos = t.get("exit_position", "")
+
+            # Build detailed description
+            detail_parts = [f"{interaction}"]
+            if penetration is not None:
+                detail_parts.append(f"penetration depth {penetration:.0%}")
+            if direction and direction not in ("brief", "stationary", "through", "n/a"):
+                detail_parts.append(f"moving {direction}")
+            detail_str = ", ".join(detail_parts)
+
+            entry_pos = t.get("relative_position", "unknown")
+            exit_str = f", exited from {exit_pos}" if exit_pos and exit_pos not in ("unknown", "n/a") else ""
+
+            lines.append(
+                f"{i}. {region_label} — {detail_str}. "
+                f"Entered at {entry_pos}{exit_str}, "
+                f"~{duration} steps inside{extras_str}{ctx_str}{sub_str}"
+            )
 
     if include_branches:
         lines.append("\nBranching events (alternative flow paths detected):")
@@ -381,10 +496,21 @@ def format_transitions_text(transitions: list[dict],
 
 
 def build_rag_documents():
-    """Build LangChain documents from the region knowledge base."""
+    """Build LangChain documents from the RAG knowledge base.
+
+    Loads all JSON and TXT files from data/rag_knowledge/.
+    If no files are found, the RAG chain will have no context and the
+    LLM will rely on its own training knowledge.
+    """
     from langchain_core.documents import Document
+
+    knowledge = load_knowledge_from_files()
+    if not knowledge:
+        print("[RAG] Warning: no knowledge files found in data/rag_knowledge/. "
+              "LLM will use its own training knowledge only.")
+
     docs = []
-    for name, desc in REGION_KNOWLEDGE.items():
+    for name, desc in knowledge.items():
         docs.append(Document(
             page_content=f"Brain Region: {name}\nFunction: {desc}",
             metadata={"region_name": name}
@@ -511,7 +637,8 @@ _cached_model = None
 
 
 def analyze_with_gpt(transitions: list[dict], use_rag: bool = True,
-                     model: str = "gpt-5.4-mini") -> str:
+                     model: str = "gpt-5.4-mini",
+                     debug: bool = False) -> str:
     global _rag_chain, _direct_chain, _cached_model
 
     if not transitions:
@@ -526,8 +653,18 @@ def analyze_with_gpt(transitions: list[dict], use_rag: bool = True,
         f"2. How does the information CHANGE and get TRANSFORMED as it passes through each region?\n"
         f"3. What spontaneous resting-state cognitive process would produce this EXACT flow?\n"
         f"4. What is the functional PURPOSE of information flowing in this exact direction and order?\n"
-        f"Do NOT repeat the region list or give a generic network label. Give deep, specific insight."
+        f"Do NOT repeat the region list or give a generic network label. Give deep, specific insight.\n"
+        f"Keep your response SHORT and focused — 2-3 concise paragraphs maximum."
     )
+
+    if debug:
+        import sys
+        print(f"\n{'='*60}")
+        print(f"[DEBUG PROMPT] analyze_with_gpt (use_rag={use_rag}, model={model})")
+        print(f"{'='*60}")
+        print(question)
+        print(f"{'='*60}\n")
+        sys.stdout.flush()
 
     # IMPORTANT: bypass LangChain entirely for no-RAG mode
     if not use_rag:

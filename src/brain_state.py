@@ -57,13 +57,25 @@ HQ_MODEL = "gpt-5.4"
 class BrainStateDB:
     """Database of brain region states, persisted to JSON."""
 
-    def __init__(self, path: Path | str = DEFAULT_STATE_FILE, model: str = DEFAULT_MODEL):
+    def __init__(self, path: Path | str = DEFAULT_STATE_FILE, model: str = DEFAULT_MODEL,
+                 debug: bool = False):
         self.path = Path(path)
         self.model = model
+        self.debug = debug
         self.states: dict[str, str] = {}  # region_name -> state description
         self.global_state: str = ""  # the overall brain state description
         if self.path.exists():
             self.load()
+
+    def _debug_prompt(self, method_name: str, prompt_text: str):
+        """Print the full prompt if debug mode is enabled."""
+        if self.debug:
+            print(f"\n{'='*60}")
+            print(f"[DEBUG PROMPT] {method_name}")
+            print(f"{'='*60}")
+            print(prompt_text)
+            print(f"{'='*60}\n")
+            sys.stdout.flush()
 
     # ---------- persistence ----------
 
@@ -168,6 +180,9 @@ Only output valid JSON, nothing else."""
             llm = ChatOpenAI(model=self.model, temperature=0.4, max_tokens=4000)
             chain = prompt | llm | StrOutputParser()
 
+            self._debug_prompt("initialize_from_global",
+                               prompt.format(global_state=global_state, regions=region_list))
+
             try:
                 result = chain.invoke({
                     "global_state": global_state,
@@ -234,6 +249,10 @@ Only output valid JSON."""
 
         llm = ChatOpenAI(model=self.model, temperature=0.2, max_tokens=300)
         chain = prompt | llm | StrOutputParser()
+
+        self._debug_prompt("validate_perturbation",
+                           prompt.format(region=region_name, current=current,
+                                         perturbation=perturbation))
 
         try:
             result = chain.invoke({
@@ -304,6 +323,8 @@ Only output valid JSON."""
                 f'["perturbation 1", "perturbation 2", "perturbation 3", "perturbation 4"]\n'
                 f"Only output valid JSON."
             )
+
+            self._debug_prompt("propose_perturbations", msg_content)
 
             print(f"[brain-state] propose_perturbations: sending API request...")
             sys.stdout.flush()
@@ -401,6 +422,10 @@ Only output the new state description, nothing else."""
 
         llm = ChatOpenAI(model=self.model, temperature=0.3, max_tokens=200)
         chain = prompt | llm | StrOutputParser()
+
+        self._debug_prompt("alter_region_state",
+                           prompt.format(region=region_name, current=current,
+                                         modification=modification))
 
         try:
             new_state = chain.invoke({
@@ -572,6 +597,16 @@ CRITICAL INSTRUCTIONS:
 
                 chain = prompt | llm | StrOutputParser()
 
+                self._debug_prompt("propagate_through_graph",
+                                   prompt.format(target=target_name,
+                                                 target_state=target_prev_state,
+                                                 strength=strength_label,
+                                                 sign=sign_label,
+                                                 source=from_name,
+                                                 source_state=from_state,
+                                                 weight=c["abs_weight"],
+                                                 context=context_text))
+
                 try:
                     new_state = chain.invoke({
                         "target": target_name,
@@ -670,6 +705,11 @@ Output ONLY the precise description of {target}'s new state (1-2 sentences). No 
 
             chain = prompt | llm | StrOutputParser()
 
+            self._debug_prompt("propagate_through_regions",
+                               prompt.format(target=name, target_state=target_state,
+                                             strength=strength_label, source=prev_name,
+                                             source_state=prev_state))
+
             try:
                 new_state = chain.invoke({
                     "target": name,
@@ -746,6 +786,10 @@ Provide your coherent resting-state network insight below:"""
         )
 
         chain = prompt | llm | StrOutputParser()
+
+        self._debug_prompt("summarize_changes",
+                           prompt.format(comparisons_before="\n".join(before_lines),
+                                         comparisons_after="\n".join(after_lines)))
 
         try:
             return chain.invoke({
@@ -836,6 +880,9 @@ RULES:
         )
 
         chain = prompt | llm | StrOutputParser()
+
+        self._debug_prompt("generate_flow_story",
+                           prompt.format(flow_path=flow_text))
 
         try:
             return chain.invoke({"flow_path": flow_text}).strip()

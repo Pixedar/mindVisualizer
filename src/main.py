@@ -67,6 +67,8 @@ MESH_DIR = DATA_DIR / "meshes"
 ALIGNMENT_FILE = DATA_DIR / "brain_alignment.json"
 DEFAULT_META = MDN_DIR / "mdn_particles_rdcim_teacher_edge_hq_grid125_meta.json"
 DEFAULT_OOS = MDN_DIR / "mdn_particles_rdcim_teacher_edge_hq_training_points.npy"
+DEFAULT_EXTRA_PARCELLATION = DATA_DIR / "extra_parcellation" / "combined_atlas.nii.gz"
+DEFAULT_EXTRA_LABELS = DATA_DIR / "extra_parcellation" / "combined_atlas_labels.json"
 
 
 # ---------- utility functions ----------
@@ -308,6 +310,13 @@ def main():
     ap.add_argument("--window-size", type=int, nargs=2, default=[1200, 800])
     ap.add_argument("--hq", action="store_true",
                     help="Use high-quality GPT model (gpt-5.4) instead of gpt-5.4-mini")
+    ap.add_argument("--debug", action="store_true",
+                    help="Print full LLM prompts to console before each call")
+    ap.add_argument("--extra-parcellation", type=Path, default=None,
+                    help="Path to NIfTI parcellation file for finer subregion labels "
+                         "(e.g., Brainnetome BN_Atlas_246_1mm.nii.gz)")
+    ap.add_argument("--extra-parcellation-labels", type=Path, default=None,
+                    help="JSON label map for extra parcellation (label_id -> name)")
     args = ap.parse_args()
 
     model = "gpt-5.4" if args.hq else "gpt-5.4-mini"
@@ -316,6 +325,7 @@ def main():
     far_from_oos = not args.no_far_from_oos
     flow_mesh_enabled = not args.no_flow_mesh
     use_rag = not args.no_rag
+    debug_mode = args.debug
 
     # ---------- load field ----------
     print(f"[field] loading {args.meta} ...")
@@ -509,11 +519,28 @@ def main():
             print("[flow mesh] disabled:", e)
             flow_mesh = None
 
+    # Optional extra parcellation (auto-detect combined atlas if no explicit path)
+    if flow_mesh:
+        _ep_nifti = args.extra_parcellation
+        _ep_labels = args.extra_parcellation_labels
+        if _ep_nifti is None and DEFAULT_EXTRA_PARCELLATION.exists():
+            _ep_nifti = DEFAULT_EXTRA_PARCELLATION
+            if _ep_labels is None and DEFAULT_EXTRA_LABELS.exists():
+                _ep_labels = DEFAULT_EXTRA_LABELS
+        if _ep_nifti is not None:
+            try:
+                from .extra_parcellation import ExtraParcellation
+                extra = ExtraParcellation(_ep_nifti, _ep_labels)
+                if extra.load():
+                    flow_mesh.set_extra_parcellation(extra)
+            except Exception as e:
+                print(f"[extra-parcellation] disabled: {e}")
+
     # Text overlay
     text_overlay = VtkTextOverlay(ren)
 
     # Brain state database
-    brain_state_db = BrainStateDB(model=model)
+    brain_state_db = BrainStateDB(model=model, debug=args.debug)
 
     # Probe system
     probe_sys = ProbeSystem(ren, win, amin, amax)
@@ -750,7 +777,8 @@ def main():
 
             rag_label = "RAG" if use_rag_flag else "direct"
             print(f"\n[GPT] Sending to GPT ({rag_label})...")
-            explanation = analyze_with_gpt(all_transitions, use_rag=use_rag_flag, model=model)
+            explanation = analyze_with_gpt(all_transitions, use_rag=use_rag_flag,
+                                            model=model, debug=debug_mode)
             gpt_pending["result"] = explanation
         except Exception as e:
             gpt_pending["result"] = f"[GPT ERROR] {e}"

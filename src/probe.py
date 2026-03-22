@@ -313,10 +313,106 @@ class FlowProbe:
                     name = f"{name} ({hemi})"
             entered_names.append(name)
             tag = " [branch]" if self.ghost else ""
-            print(f"[probe{self.label}{tag}] ENTERED: {name}")
+            # Detailed entry log with position context
+            pos_detail = ""
+            if self.position is not None and self._mesh_overlay is not None:
+                try:
+                    center = self._mesh_overlay.get_mesh_center(key)
+                    bounds = self._mesh_overlay.get_mesh_bounds(key)
+                    if center is not None and bounds is not None:
+                        extent = [bounds[1]-bounds[0], bounds[3]-bounds[2],
+                                  bounds[5]-bounds[4]]
+                        char_size = sum(extent) / 3.0
+                        dist = float(np.linalg.norm(self.position - center))
+                        depth = max(0.0, 1.0 - min(dist / (char_size * 0.5), 1.0))
+                        pos_parts = []
+                        diff = self.position - center
+                        if abs(diff[2]) > extent[2] * 0.15:
+                            pos_parts.append("dorsal" if diff[2] > 0 else "ventral")
+                        if abs(diff[0]) > extent[0] * 0.15:
+                            pos_parts.append("lateral-R" if diff[0] > 0 else "lateral-L")
+                        if abs(diff[1]) > extent[1] * 0.15:
+                            pos_parts.append("anterior" if diff[1] > 0 else "posterior")
+                        pos_str = "-".join(pos_parts) if pos_parts else "central"
+                        pos_detail = f"  [{pos_str}, depth={depth:.0%}]"
+                except Exception:
+                    pass
+            print(f"[probe{self.label}{tag}] ENTERED: {name}{pos_detail}")
 
         self._highlighted_regions = new_regions
         self.current_regions = new_regions
+
+        # --- Extra parcellation subregion highlighting ---
+        if (self._mesh_overlay is not None and
+                hasattr(self._mesh_overlay, '_extra') and
+                self._mesh_overlay._extra is not None and
+                self.position is not None and new_regions):
+            try:
+                hier = self._mesh_overlay.get_hierarchical_regions_at_point(self.position)
+                sub = hier.get("subregion")
+                sub_mesh = hier.get("subregion_mesh")
+                sub_key = f"_extra_{sub['label_id']}" if sub else None
+
+                # Remove old subregion highlight if changed
+                old_sub_key = getattr(self, '_current_subregion_key', None)
+                if old_sub_key and old_sub_key != sub_key:
+                    if old_sub_key in self._highlight_actors:
+                        try:
+                            self.ren.RemoveActor(self._highlight_actors[old_sub_key])
+                        except Exception:
+                            pass
+                        del self._highlight_actors[old_sub_key]
+
+                # Add new subregion highlight (orange, slightly more opaque)
+                if sub_key and sub_mesh and sub_key not in self._highlight_actors:
+                    # Clip to probe hemisphere (left/right) so we don't
+                    # highlight both sides of a bilateral parcellation mesh
+                    display_mesh = sub_mesh
+                    try:
+                        bounds = [0.0] * 6
+                        sub_mesh.GetBounds(bounds)
+                        x_extent = bounds[1] - bounds[0]
+                        # Only clip if the mesh spans a wide X range (bilateral)
+                        if x_extent > 10.0:
+                            x_mid = (bounds[0] + bounds[1]) / 2.0
+                            plane = vtk.vtkPlane()
+                            plane.SetOrigin(x_mid, 0, 0)
+                            # Normal points toward the probe's side
+                            if self.position[0] >= x_mid:
+                                plane.SetNormal(1, 0, 0)
+                            else:
+                                plane.SetNormal(-1, 0, 0)
+                            clipper = vtk.vtkClipPolyData()
+                            clipper.SetInputData(sub_mesh)
+                            clipper.SetClipFunction(plane)
+                            clipper.SetInsideOut(False)
+                            clipper.Update()
+                            clipped = clipper.GetOutput()
+                            if clipped and clipped.GetNumberOfPoints() > 0:
+                                display_mesh = clipped
+                    except Exception:
+                        pass
+
+                    mapper = vtk.vtkPolyDataMapper()
+                    mapper.SetInputData(display_mesh)
+                    actor = vtk.vtkActor()
+                    actor.SetMapper(mapper)
+                    actor.GetProperty().SetColor(1.0, 0.6, 0.0)  # orange
+                    actor.GetProperty().SetOpacity(0.3)
+                    actor.GetProperty().LightingOff()
+                    self.ren.AddActor(actor)
+                    self._highlight_actors[sub_key] = actor
+                    tag = " [branch]" if self.ghost else ""
+                    hemi_str = ""
+                    if self.position is not None and self.position[0] >= 0:
+                        hemi_str = " (right hemisphere)"
+                    elif self.position is not None:
+                        hemi_str = " (left hemisphere)"
+                    print(f"[probe{self.label}{tag}] SUBREGION: {sub['name']}{hemi_str}")
+
+                self._current_subregion_key = sub_key
+            except Exception:
+                pass
 
         if self._on_region_change and (entered_names or left_names):
             self._on_region_change(entered_names, left_names,
