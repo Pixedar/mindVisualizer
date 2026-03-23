@@ -51,6 +51,8 @@ python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 #.venv\Scripts\activate  # Windows
 
+python -m pip install --upgrade pip setuptools wheel
+
 pip install -e .
 
 #This downloads the **Allen Human Brain Atlas** via BrainGlobe and builds cached lookup data
@@ -70,7 +72,10 @@ python setup_brain_data.py
 Create a `.env` file in the project root:
 
 ```env
-OPENAI_API_KEY=sk-your-key-here
+# Linux/macOS
+printf 'OPENAI_API_KEY=sk-your-key-here\n' > .env
+# Windows (PowerShell)
+'OPENAI_API_KEY=sk-your-key-here' | Set-Content .env
 ```
 
 By default the app uses **GPT-5.4-mini** (fast and cheap). Pass `--hq` to switch to **GPT-5.4** for higher-quality interpretations.

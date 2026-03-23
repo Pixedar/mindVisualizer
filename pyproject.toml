@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mindvisualizer"
 version = "0.1.0"
 description = "Brain flow particle visualizer with probe analysis"
-requires-python = ">=3.9"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -21,4 +22,11 @@ dependencies = [
 ]
 
 [project.scripts]
-mindviz = "src.main:main"
+mindviz = "mindvisualizer.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mindvisualizer*"]
