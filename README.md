@@ -10,8 +10,7 @@ The first is a **general information flow model** — an estimated field of how 
 
 The second is a **raw rDCIM connectivity mode**. Here, the brain is represented more directly as a graph of connections between ROIs. You can think of it as a 3D graph showing how different brain regions are linked during rest through effective connectivity.
 
-The third is an **ROI flow mode** — a dual-window visualization where the left panel shows particle flow through a learned neural manifold, and the right panel shows the corresponding ROI activation pattern. As you trace a path through the manifold, the system maps each position to a brain-region activation vector using kNN interpolation, and the LLM interprets what the resulting flow pattern means.
-
+The third is an **ROI flow mode** — a dual-window visualization where the left panel shows particle flow through a learned resting-state manifold, and the right panel shows the corresponding ROI activation pattern. The manifold is a 2SDM-style low-dimensional embedding of resting-state fMRI, and the flow field is an MDN learned from trajectories through that space. As you trace a path, the system maps each position to a brain-region activation vector using kNN interpolation, and the LLM interprets which networks become more or less involved.
 ## Flow mode
 The flow mode is designed for interactive exploration.
 
@@ -38,9 +37,9 @@ At the end, the LLM provides an interpretation of what this perturbation changed
 
 ## ROI flow mode
 
-In this mode, you explore a learned neural manifold (not the brain directly). Each position in this manifold corresponds to a particular pattern of brain region activations, derived from resting-state fMRI data.
+In this mode, you explore a learned resting-state manifold rather than anatomical brain space directly. The manifold is a 2SDM-style low-dimensional embedding, and the flow field is an MDN learned from trajectories through that space. You place a probe in the manifold, let it follow the learned flow, and the right panel updates in real time to show the corresponding ROI activation pattern. When you freeze the probe (`Shift+G`), the system compares the start and end ROI patterns and asks the LLM to interpret which networks became more or less involved, and what kind of resting-state transition that path may reflect.
 
-You place a probe in the manifold, let it follow the flow, and the right panel updates in real time to show which brain regions are active or suppressed at each point along the path. When you freeze the probe (`Shift+G`), the system computes the delta between start and end ROI activations and asks the LLM to interpret what this specific flow pattern means — which networks were affected, what direction the information flowed, and what cognitive process could produce it.
+> Based on the original [2sDM paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC8410525/) and extended in my [Brain State Manifold video](https://www.youtube.com/watch?v=CyhyVNfDDZs).
 
 ---
 
