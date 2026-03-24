@@ -260,6 +260,8 @@ class RDCIMVisualizer:
         self._anim_source_idx = None     # source ROI for animation
         self._anim_frame = 0             # current animation frame
         self._anim_playing = False       # True while loop animation is active
+        self.propagation_depth = 2       # user-adjustable depth for Shift+P
+        self.propagation_top_k = 10      # connections per level
 
         # Compute stats
         Ac = A.copy()
@@ -553,8 +555,10 @@ class RDCIMVisualizer:
             self._roi_actors[idx].GetProperty().SetColor(1.0, 1.0, 0.0)
             self._roi_actors[idx].GetProperty().SetOpacity(1.0)
 
-        self._show_connections(idx)
-        print(f"[select] ROI {idx}: {self.roi_names[idx]}")
+        self._show_connections(idx, depth=self.propagation_depth,
+                               top_k=self.propagation_top_k)
+        print(f"[select] ROI {idx}: {self.roi_names[idx]} "
+              f"(depth={self.propagation_depth}, top_k={self.propagation_top_k})")
 
     def run(self):
         """Start the interactive visualizer."""
@@ -699,7 +703,9 @@ class RDCIMVisualizer:
                 source_name = self.roi_names[self.selected_roi]
                 source_idx = self.selected_roi
                 connections = get_strongest_connections(
-                    self.A, source_idx, top_k=10, depth=2
+                    self.A, source_idx,
+                    top_k=self.propagation_top_k,
+                    depth=self.propagation_depth
                 )
 
                 self._sel_actor.SetInput(f"Propagating from {source_name}...\n(window will freeze briefly)")
@@ -827,13 +833,63 @@ class RDCIMVisualizer:
                 self.connection_threshold = min(0.5, self.connection_threshold * 1.5)
                 print(f"[threshold] {self.connection_threshold:.3f}")
                 if self.selected_roi is not None:
-                    self._show_connections(self.selected_roi)
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
 
             elif key_lower in ("minus", "underscore"):
                 self.connection_threshold = max(0.001, self.connection_threshold / 1.5)
                 print(f"[threshold] {self.connection_threshold:.3f}")
                 if self.selected_roi is not None:
-                    self._show_connections(self.selected_roi)
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
+
+            elif key_lower == "bracketright":
+                # ] = increase propagation depth
+                self.propagation_depth = min(6, self.propagation_depth + 1)
+                print(f"[depth] propagation depth = {self.propagation_depth}")
+                self._sel_actor.SetInput(
+                    f"Propagation depth: {self.propagation_depth}\n"
+                    f"(top_k={self.propagation_top_k} per level)")
+                if self.selected_roi is not None:
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
+                self.win.Render()
+
+            elif key_lower == "bracketleft":
+                # [ = decrease propagation depth
+                self.propagation_depth = max(1, self.propagation_depth - 1)
+                print(f"[depth] propagation depth = {self.propagation_depth}")
+                self._sel_actor.SetInput(
+                    f"Propagation depth: {self.propagation_depth}\n"
+                    f"(top_k={self.propagation_top_k} per level)")
+                if self.selected_roi is not None:
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
+                self.win.Render()
+
+            elif key_lower == "period":
+                # . = increase top_k (more connections per level)
+                self.propagation_top_k = min(50, self.propagation_top_k + 5)
+                print(f"[top_k] connections per level = {self.propagation_top_k}")
+                if self.selected_roi is not None:
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
+                self.win.Render()
+
+            elif key_lower == "comma":
+                # , = decrease top_k
+                self.propagation_top_k = max(3, self.propagation_top_k - 5)
+                print(f"[top_k] connections per level = {self.propagation_top_k}")
+                if self.selected_roi is not None:
+                    self._show_connections(self.selected_roi,
+                                           depth=self.propagation_depth,
+                                           top_k=self.propagation_top_k)
+                self.win.Render()
 
         def on_anim_timer(_o, _e):
             """Looped propagation animation — show signal traveling step by step."""
@@ -883,7 +939,8 @@ class RDCIMVisualizer:
         print(f"  ROIs: {self.R}")
         print(f"  Max |weight|: {self.max_weight:.4f}")
         print(f"  Click ROI to select | p perturb | Shift+P propagate")
-        print(f"  s init states | r reset | +/- threshold | Esc quit")
+        print(f"  s init states | r reset | +/- threshold")
+        print(f"  [/] depth ({self.propagation_depth}) | ,/. top_k ({self.propagation_top_k}) | Esc quit")
         print()
 
         iren.Start()

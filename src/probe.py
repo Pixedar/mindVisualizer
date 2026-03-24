@@ -301,7 +301,7 @@ class FlowProbe:
                 mapper.SetInputData(poly)
                 actor = vtk.vtkActor()
                 actor.SetMapper(mapper)
-                actor.GetProperty().SetColor(1.0, 0.0, 0.0)
+                actor.GetProperty().SetColor(1.0, 0.6, 0.0)  # orange (all regions)
                 actor.GetProperty().SetOpacity(highlight_opacity)
                 actor.GetProperty().LightingOff()
                 self.ren.AddActor(actor)
@@ -343,6 +343,7 @@ class FlowProbe:
         self.current_regions = new_regions
 
         # --- Extra parcellation subregion highlighting ---
+        # Extra parcellation subregions also get orange, same as main regions.
         if (self._mesh_overlay is not None and
                 hasattr(self._mesh_overlay, '_extra') and
                 self._mesh_overlay._extra is not None and
@@ -363,21 +364,17 @@ class FlowProbe:
                             pass
                         del self._highlight_actors[old_sub_key]
 
-                # Add new subregion highlight (orange, slightly more opaque)
+                # Add new subregion highlight (orange, same as all regions)
                 if sub_key and sub_mesh and sub_key not in self._highlight_actors:
-                    # Clip to probe hemisphere (left/right) so we don't
-                    # highlight both sides of a bilateral parcellation mesh
                     display_mesh = sub_mesh
                     try:
                         bounds = [0.0] * 6
                         sub_mesh.GetBounds(bounds)
                         x_extent = bounds[1] - bounds[0]
-                        # Only clip if the mesh spans a wide X range (bilateral)
                         if x_extent > 10.0:
                             x_mid = (bounds[0] + bounds[1]) / 2.0
                             plane = vtk.vtkPlane()
                             plane.SetOrigin(x_mid, 0, 0)
-                            # Normal points toward the probe's side
                             if self.position[0] >= x_mid:
                                 plane.SetNormal(1, 0, 0)
                             else:
@@ -410,13 +407,88 @@ class FlowProbe:
                         hemi_str = " (left hemisphere)"
                     print(f"[probe{self.label}{tag}] SUBREGION: {sub['name']}{hemi_str}")
 
+                # Hide coarser main-atlas regions when we have a finer subregion
+                if sub_key and sub_key in self._highlight_actors:
+                    hidden = set()
+                    for rkey in new_regions:
+                        if rkey in self._highlight_actors and not rkey.startswith("_extra_"):
+                            self._highlight_actors[rkey].VisibilityOff()
+                            hidden.add(rkey)
+                    self._hidden_orange_keys = hidden
+                elif not sub_key:
+                    for rkey in getattr(self, '_hidden_orange_keys', set()):
+                        if rkey in self._highlight_actors:
+                            self._highlight_actors[rkey].VisibilityOn()
+                    self._hidden_orange_keys = set()
+
                 self._current_subregion_key = sub_key
             except Exception:
                 pass
 
+        # --- Red hotspot: clip mesh near probe position ---
+        # Instead of coloring an entire region red, clip the mesh surface
+        # within a sphere around the probe and show that patch in red.
+        self._update_hotspot()
+
         if self._on_region_change and (entered_names or left_names):
             self._on_region_change(entered_names, left_names,
                                    is_ghost=self.ghost, label=self.label)
+
+    def _update_hotspot(self):
+        """Color highlighted region meshes with a distance-based heatmap.
+
+        Vertices near the probe are red, fading smoothly to orange further away.
+        Uses per-vertex RGBA scalars — no clipping, no extra actors.
+        """
+        from vtkmodules.util.numpy_support import vtk_to_numpy, numpy_to_vtk
+
+        if self.position is None or not self._highlight_actors:
+            return
+
+        probe_pos = self.position.astype(np.float64)
+        fade_radius = 15.0  # mm — distance over which red fades to orange
+
+        for key, actor in self._highlight_actors.items():
+            mapper = actor.GetMapper()
+            if mapper is None:
+                continue
+            poly = mapper.GetInput()
+            if poly is None or poly.GetNumberOfPoints() < 3:
+                continue
+
+            pts_vtk = poly.GetPoints()
+            if pts_vtk is None:
+                continue
+            verts = vtk_to_numpy(pts_vtk.GetData()).astype(np.float64)
+
+            # Distance from each vertex to probe
+            dists = np.linalg.norm(verts - probe_pos, axis=1)
+            t = np.clip(dists / fade_radius, 0.0, 1.0)  # 0=at probe, 1=far
+
+            # Color gradient: red (1,0,0) at probe → orange (1,0.6,0) far
+            r = np.full(len(t), 255, np.uint8)
+            g = (t * 0.6 * 255).astype(np.uint8)
+            b = np.zeros(len(t), np.uint8)
+
+            # Alpha: brighter near probe, dimmer far away
+            base_opacity = 0.45 if not self.ghost else 0.2
+            far_opacity = 0.2 if not self.ghost else 0.08
+            alpha_f = far_opacity + (base_opacity - far_opacity) * (1.0 - t)
+            a = (np.clip(alpha_f, 0.0, 1.0) * 255).astype(np.uint8)
+
+            rgba = np.column_stack([r, g, b, a])
+            scalars = numpy_to_vtk(rgba, deep=True)
+            scalars.SetNumberOfComponents(4)
+            scalars.SetName("HeatmapColors")
+            poly.GetPointData().SetScalars(scalars)
+
+            mapper.SetColorModeToDirectScalars()
+            mapper.SetScalarModeToUsePointData()
+            mapper.ScalarVisibilityOn()
+            actor.GetProperty().LightingOff()
+            # Override the flat color — let scalars drive everything
+            actor.GetProperty().SetOpacity(1.0)
+            poly.Modified()
 
     def clear(self):
         self.active = False

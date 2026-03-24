@@ -330,3 +330,70 @@ class ROIFlowLLM:
             import traceback
             traceback.print_exc()
             return f"[GPT ERROR] {e}"
+
+    def compare_two_paths(self, context_a: str, context_b: str) -> str:
+        """Compare two ROI flow patterns using the LLM.
+
+        Args:
+            context_a: structured text from path A analysis
+            context_b: structured text from path B analysis
+
+        Returns:
+            LLM comparison interpretation text.
+        """
+        from src.region_analyzer import _ensure_ssl
+        _ensure_ssl()
+
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        instructions = (
+            "You are a neuroscientist comparing TWO different brain state "
+            "transitions observed in a neural manifold flow simulation. "
+            "Each path represents a different trajectory through the manifold, "
+            "producing different shifts in ROI contributions.\n\n"
+            "You are given the ROI flow analysis for Path A and Path B.\n\n"
+            "Compare them: What is SIMILAR between the two transitions? "
+            "What is DIFFERENT? Which cognitive or neural processes might "
+            "explain the divergence? Which path represents a more dramatic "
+            "state change? Are they transitions within the same network or "
+            "do they involve fundamentally different networks?\n\n"
+            "Keep your response SHORT — 2-3 concise paragraphs maximum."
+        )
+
+        question = (
+            "=== PATH A ===\n" + context_a + "\n\n"
+            "=== PATH B ===\n" + context_b
+        )
+
+        if self.debug:
+            import sys
+            print(f"\n{'='*60}")
+            print(f"[DEBUG PROMPT] ROIFlowLLM.compare_two_paths")
+            print(f"{'='*60}")
+            print(f"INSTRUCTIONS:\n{instructions}")
+            print(f"\nINPUT:\n{question}")
+            print(f"{'='*60}\n")
+            sys.stdout.flush()
+
+        try:
+            from openai import OpenAI
+            client = OpenAI(timeout=90.0)
+
+            resp = client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=question,
+                reasoning={"effort": "low"},
+                max_output_tokens=3000,
+            )
+
+            text = (resp.output_text or "").strip()
+            if text:
+                return text
+            return "[GPT ERROR] No response text."
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return f"[GPT ERROR] {e}"

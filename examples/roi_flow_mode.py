@@ -16,7 +16,10 @@ Controls:
     G then click — place probe in manifold (follows flow)
     M then click — manual path mode (click to extend path)
     Shift+G     — freeze probe, compute ROI delta, ask LLM
-    C           — clear probe, ROI display, and flow particles
+    V           — toggle ROI anim mode (path ↔ particles)
+    1 / 2       — save current path as Path A / B
+    D           — compare Path A vs Path B (cyan=A, magenta=B)
+    C           — clear all
     +/-         — speed scale
     Q/Esc       — quit
 
@@ -291,12 +294,15 @@ class ROIFlowDots:
         # Endpoint fade parameters (matching original)
         self._fade_start = 0.08   # fade in over first 8%
         self._fade_end = 0.08     # fade out over last 8%
-        # Burst mode (on by default, matching original pulsing behavior)
+        # Burst mode (on by default — short sharp bursts with visible gap)
         self.burst_mode = True
-        self.burst_period = 1.0       # seconds per cycle
-        self.burst_emit_frac = 0.4    # emit during first 40% of cycle
+        self.burst_period = 0.6       # seconds per cycle (fast)
+        self.burst_emit_frac = 0.25   # emit during first 25% — short burst, long gap
         self._burst_timer = 0.0
-        self.capture_accel = 1.5      # speed up particles during capture phase
+        self.capture_accel = 2.5      # fast capture so particles clear out during gap
+        # Mid-segment fade: make particles transparent in the middle of their journey
+        # so you can clearly see source and destination endpoints
+        self._mid_fade = True
 
         # Use build_cloud from src/main.py
         init_rgba = np.zeros((self.Nmax, 4), np.uint8)
@@ -379,7 +385,7 @@ class ROIFlowDots:
                     dst_roi = self._pos_idx[choice % Nr]
                     self.p0[use] = self.C[src_roi]
                     self.dest[use] = self.C[dst_roi]
-                    self.life[use] = self.rng.uniform(1.75, 3.5, size=len(use)).astype(np.float32)
+                    self.life[use] = self.rng.uniform(0.8, 1.8, size=len(use)).astype(np.float32)
                     self.age[use] = 0.0
                     self.alive[use] = True
                     seg_len = np.linalg.norm(self.dest[use] - self.p0[use], axis=1)
@@ -403,12 +409,27 @@ class ROIFlowDots:
             t = np.clip(spd / max(s_max, 1e-8), 0.0, 1.0)
             rgb = turbo_rgb01(t)
 
-            # Endpoint fade: transparent near spawn and destination
+            # Endpoint fade + mid-segment dip
+            # Particles are opaque near source and destination but fade in the
+            # middle of their journey so you can clearly see where they come
+            # from and where they go.
             prog = np.clip(self.age[idx] / self.life[idx], 0.0, 1.0)
             fs, fe = self._fade_start, self._fade_end
+
+            # Base endpoint fade
             alpha = np.where(prog < fs, prog / max(fs, 1e-6),
                              np.where(prog > (1.0 - fe),
                                       (1.0 - prog) / max(fe, 1e-6), 1.0))
+
+            # Mid-segment transparency dip (U-shaped alpha along journey)
+            if getattr(self, '_mid_fade', False):
+                # mid_alpha: 1.0 at endpoints, dips to 0.3 at center
+                mid = 0.5
+                spread = 0.35  # width of the dip
+                dist_from_mid = np.abs(prog - mid) / spread
+                mid_alpha = np.clip(0.3 + 0.7 * dist_from_mid, 0.3, 1.0)
+                alpha = alpha * mid_alpha
+
             alpha = (np.clip(alpha, 0.0, 1.0) * 220).astype(np.uint8)
 
             rgba[idx, :3] = rgb
@@ -426,6 +447,330 @@ class ROIFlowDots:
 
     def is_active(self):
         return self.emitter_on
+
+
+# ---------------------------------------------------------------------------
+# ROI Path Animation — animate ROI activation along the probe path
+# ---------------------------------------------------------------------------
+
+class ROIPathAnimation:
+    """Snap between START and END ROI activation states — no intermediates.
+
+    Fast toggle between the brain state at the beginning vs end of the path.
+    200 most dynamic ROIs are animated; the rest stay dim gray.
+    Active ROIs are vivid turbo-colored and blow up to 3.5× base radius.
+    Quiet ROIs shrink to near-invisible gray dots.
+    """
+
+    N_TOP = 200             # number of ROIs to animate
+    TOGGLE_TICKS = 40       # ticks to hold each state before flipping
+    RADIUS_MIN_FRAC = 0.3   # quiet ROI radius multiplier
+    RADIUS_MAX_FRAC = 3.5   # loudest ROI radius multiplier
+
+    def __init__(self, roi_panel: ROIPanel, knn: 'ManifoldToROIKNN'):
+        self.panel = roi_panel
+        self.knn = knn
+        self.active = False
+        self._start_vals: np.ndarray | None = None   # (n_rois,)
+        self._end_vals: np.ndarray | None = None     # (n_rois,)
+        self._top_mask: np.ndarray | None = None     # (n_rois,) bool
+        self._showing_end = False
+        self._tick_counter = 0
+        self._abs_max_start = 1.0
+        self._abs_max_end = 1.0
+
+    # ----- resampling helper (also used by ROIPathCompare) -----
+    @staticmethod
+    def _resample_path(pts: np.ndarray, n: int) -> np.ndarray:
+        diffs = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        cum = np.concatenate([[0.0], np.cumsum(diffs)])
+        total_len = cum[-1]
+        if total_len < 1e-9:
+            return pts[:1]
+        sample_dists = np.linspace(0, total_len, n)
+        out = np.zeros((n, 3), np.float32)
+        for i, sd in enumerate(sample_dists):
+            idx = np.clip(np.searchsorted(cum, sd, side='right') - 1,
+                          0, len(pts) - 2)
+            seg_len = cum[idx + 1] - cum[idx]
+            t = (sd - cum[idx]) / max(seg_len, 1e-9)
+            out[i] = pts[idx] * (1 - t) + pts[idx + 1] * t
+        return out
+
+    def build_from_path(self, path_points: list[np.ndarray],
+                        n_samples: int = 60):
+        """Query ROI values at path start and end."""
+        if len(path_points) < 2:
+            return
+
+        pts = np.array(path_points, dtype=np.float32)
+        start_pt = pts[0]
+        end_pt = pts[-1]
+
+        start_vals = self.knn.query(start_pt)
+        end_vals = self.knn.query(end_pt)
+
+        # Select top N_TOP ROIs by absolute difference start→end
+        diff = np.abs(end_vals - start_vals)
+        n_top = min(self.N_TOP, self.panel.n_rois)
+        top_indices = np.argsort(-diff)[:n_top]
+        mask = np.zeros(self.panel.n_rois, bool)
+        mask[top_indices] = True
+
+        self._start_vals = start_vals
+        self._end_vals = end_vals
+        self._top_mask = mask
+        self._abs_max_start = float(np.percentile(np.abs(start_vals[mask]), 97)) + 1e-8
+        self._abs_max_end = float(np.percentile(np.abs(end_vals[mask]), 97)) + 1e-8
+        self._showing_end = False
+        self._tick_counter = 0
+        self.active = True
+
+        # Dim non-selected ROIs immediately
+        for i in range(self.panel.n_rois):
+            if not mask[i]:
+                self.panel._spheres[i].GetProperty().SetColor(0.3, 0.3, 0.32)
+                self.panel._spheres[i].GetProperty().SetOpacity(0.06)
+                mapper = self.panel._spheres[i].GetMapper()
+                src = vtk.vtkSphereSource()
+                src.SetCenter(*self.panel.centers[i])
+                src.SetRadius(self.panel.base_radius * 0.25)
+                src.SetPhiResolution(6)
+                src.SetThetaResolution(6)
+                src.Update()
+                mapper.SetInputData(src.GetOutput())
+                mapper.Update()
+
+        # Apply start state immediately
+        self._apply_state(False)
+
+        print(f"[roi-anim] Start/end toggle: {n_top} active ROIs, "
+              f"flip every {self.TOGGLE_TICKS} ticks")
+
+    def _apply_state(self, show_end: bool):
+        """Snap all selected ROIs to start or end state."""
+        vals = self._end_vals if show_end else self._start_vals
+        abs_max = self._abs_max_end if show_end else self._abs_max_start
+
+        for i in range(self.panel.n_rois):
+            if not self._top_mask[i]:
+                continue
+
+            v = float(vals[i])
+            intensity = min(abs(v) / abs_max, 1.0)
+
+            # Pure turbo color — no gray blending for strong signals
+            rgb_t = turbo_rgb01(np.array([intensity]))[0]
+            tr, tg, tb = rgb_t[0] / 255.0, rgb_t[1] / 255.0, rgb_t[2] / 255.0
+
+            # Blend: very low intensity stays slightly gray, rest is full turbo
+            if intensity < 0.08:
+                r, g, b = 0.45, 0.45, 0.47
+            else:
+                sat = min(intensity * 1.5, 1.0)
+                r = 0.45 * (1 - sat) + tr * sat
+                g = 0.45 * (1 - sat) + tg * sat
+                b = 0.47 * (1 - sat) + tb * sat
+
+            # Radius: massive difference between quiet and active
+            radius = self.panel.base_radius * (
+                self.RADIUS_MIN_FRAC
+                + (self.RADIUS_MAX_FRAC - self.RADIUS_MIN_FRAC) * intensity
+            )
+
+            # Opacity
+            opacity = 0.12 + 0.88 * intensity
+
+            self.panel._spheres[i].GetProperty().SetColor(r, g, b)
+            self.panel._spheres[i].GetProperty().SetOpacity(opacity)
+
+            mapper = self.panel._spheres[i].GetMapper()
+            src = vtk.vtkSphereSource()
+            src.SetCenter(*self.panel.centers[i])
+            src.SetRadius(radius)
+            src.SetPhiResolution(16)
+            src.SetThetaResolution(16)
+            src.Update()
+            mapper.SetInputData(src.GetOutput())
+            mapper.Update()
+
+        self._showing_end = show_end
+
+    def tick(self):
+        """Toggle between start and end states on a timer."""
+        if not self.active:
+            return
+
+        self._tick_counter += 1
+        if self._tick_counter >= self.TOGGLE_TICKS:
+            self._tick_counter = 0
+            self._apply_state(not self._showing_end)
+
+    def stop(self):
+        self.active = False
+        self._start_vals = None
+        self._end_vals = None
+        self.panel.restore_spheres()
+        self.panel.reset_colors()
+
+    def is_active(self):
+        return self.active
+
+
+# ---------------------------------------------------------------------------
+# ROI Path Comparison — animate difference between two paths
+# ---------------------------------------------------------------------------
+
+class ROIPathCompare:
+    """Animate the difference between two saved paths.
+
+    Shows how Path A vs Path B differ in their ROI activation trajectories.
+    Color encodes which path activates each ROI more:
+      - Cyan  = Path A dominant
+      - Magenta = Path B dominant
+      - Gray  = similar
+    Sphere size pulses with magnitude of the difference.
+    """
+
+    N_TOP = 100
+    RADIUS_MIN_FRAC = 0.6
+    RADIUS_MAX_FRAC = 2.5
+
+    def __init__(self, roi_panel: ROIPanel, knn: 'ManifoldToROIKNN'):
+        self.panel = roi_panel
+        self.knn = knn
+        self.active = False
+        self._diff_frames: np.ndarray | None = None  # (n, n_rois)
+        self._top_mask: np.ndarray | None = None
+        self._global_max: float = 1.0
+        self._n_frames = 0
+        self._cursor = 0.0
+        self._direction = 1
+        self._tick_accum = 0.0
+
+    def build(self, path_a: list[np.ndarray], path_b: list[np.ndarray],
+              n_samples: int = 60):
+        """Build comparison animation from two paths."""
+        if len(path_a) < 2 or len(path_b) < 2:
+            print("[compare] Both paths need at least 2 points.")
+            return
+
+        pts_a = ROIPathAnimation._resample_path(
+            np.array(path_a, np.float32), n_samples)
+        pts_b = ROIPathAnimation._resample_path(
+            np.array(path_b, np.float32), n_samples)
+
+        frames_a = np.zeros((n_samples, self.panel.n_rois), np.float32)
+        frames_b = np.zeros((n_samples, self.panel.n_rois), np.float32)
+        for i in range(n_samples):
+            frames_a[i] = self.knn.query(pts_a[i])
+            frames_b[i] = self.knn.query(pts_b[i])
+
+        # Difference: positive = A stronger, negative = B stronger
+        diff = frames_a - frames_b
+
+        # Top N most different ROIs
+        max_diff = np.max(np.abs(diff), axis=0)
+        n_top = min(self.N_TOP, self.panel.n_rois)
+        top_idx = np.argsort(-max_diff)[:n_top]
+        mask = np.zeros(self.panel.n_rois, bool)
+        mask[top_idx] = True
+
+        self._diff_frames = diff
+        self._top_mask = mask
+        self._global_max = float(np.percentile(max_diff[mask], 97)) + 1e-8
+        self._n_frames = n_samples
+        self._cursor = 0.0
+        self._direction = 1
+        self._tick_accum = 0.0
+        self.active = True
+
+        # Dim non-selected
+        for i in range(self.panel.n_rois):
+            if not mask[i]:
+                self.panel._spheres[i].GetProperty().SetColor(0.3, 0.3, 0.3)
+                self.panel._spheres[i].GetProperty().SetOpacity(0.06)
+                mapper = self.panel._spheres[i].GetMapper()
+                src = vtk.vtkSphereSource()
+                src.SetCenter(*self.panel.centers[i])
+                src.SetRadius(self.panel.base_radius * 0.35)
+                src.SetPhiResolution(8)
+                src.SetThetaResolution(8)
+                src.Update()
+                mapper.SetInputData(src.GetOutput())
+
+        print(f"[compare] Built comparison: {n_samples} frames, "
+              f"{n_top} active ROIs")
+
+    def tick(self):
+        if not self.active or self._diff_frames is None:
+            return
+
+        self._tick_accum += 0.5
+        if self._tick_accum < 1.0:
+            return
+        self._tick_accum -= 1.0
+
+        self._cursor += self._direction
+        if self._cursor >= self._n_frames - 1:
+            self._cursor = float(self._n_frames - 1)
+            self._direction = -1
+        elif self._cursor <= 0:
+            self._cursor = 0.0
+            self._direction = 1
+
+        idx_lo = int(self._cursor)
+        idx_hi = min(idx_lo + 1, self._n_frames - 1)
+        frac = self._cursor - idx_lo
+        cur = (self._diff_frames[idx_lo] * (1 - frac)
+               + self._diff_frames[idx_hi] * frac)
+
+        gm = self._global_max
+
+        for i in range(self.panel.n_rois):
+            if not self._top_mask[i]:
+                continue
+            d = float(cur[i])
+            mag = min(abs(d) / gm, 1.0)
+
+            # Cyan (A dominant) ↔ gray ↔ Magenta (B dominant)
+            if d > 0:
+                # Path A stronger → cyan
+                r = 0.5 * (1 - mag)
+                g = 0.5 + 0.5 * mag
+                b = 0.5 + 0.5 * mag
+            else:
+                # Path B stronger → magenta
+                r = 0.5 + 0.5 * mag
+                g = 0.5 * (1 - mag)
+                b = 0.5 + 0.5 * mag
+
+            radius = self.panel.base_radius * (
+                self.RADIUS_MIN_FRAC
+                + (self.RADIUS_MAX_FRAC - self.RADIUS_MIN_FRAC) * mag)
+            opacity = 0.2 + 0.8 * mag
+
+            self.panel._spheres[i].GetProperty().SetColor(r, g, b)
+            self.panel._spheres[i].GetProperty().SetOpacity(opacity)
+
+            mapper = self.panel._spheres[i].GetMapper()
+            src = vtk.vtkSphereSource()
+            src.SetCenter(*self.panel.centers[i])
+            src.SetRadius(radius)
+            src.SetPhiResolution(16)
+            src.SetThetaResolution(16)
+            src.Update()
+            mapper.SetInputData(src.GetOutput())
+            mapper.Update()
+
+    def stop(self):
+        self.active = False
+        self._diff_frames = None
+        self.panel.restore_spheres()
+        self.panel.reset_colors()
+
+    def is_active(self):
+        return self.active
 
 
 # ---------------------------------------------------------------------------
@@ -582,8 +927,17 @@ def main():
     # ---------- ROI Panel ----------
     roi_panel = ROIPanel(ren_roi, C_centers, roi_names)
 
-    # ---------- ROI Flow Dots ----------
+    # ---------- ROI Flow Dots (particle mode — alternative) ----------
     roi_flow_dots = ROIFlowDots(ren_roi, C_centers)
+
+    # ---------- ROI Path Animation (default mode) ----------
+    roi_path_anim = ROIPathAnimation(roi_panel, knn)
+    roi_anim_mode = ["path"]  # "path" (default) or "particles"
+
+    # ---------- ROI Path Comparison ----------
+    roi_path_compare = ROIPathCompare(roi_panel, knn)
+    saved_paths = {"A": None, "B": None}  # saved path point lists
+    saved_trail_actors = {"A": None, "B": None}  # trail actors for saved paths
 
     # ---------- Probe state ----------
     probe_mode = [None]  # None, "flow", "manual"
@@ -616,12 +970,77 @@ def main():
         "G then click  place probe (flow)",
         "M then click  manual path mode",
         "Shift+G       freeze & interpret",
-        "C             clear",
-        "+/-           speed scale",
-        "Q             quit",
+        "V             toggle ROI anim mode",
+        "1 / 2         save path A / B",
+        "D             compare A vs B",
+        "C             clear all",
+        "+/-           speed  |  Q quit",
     ], font_px=12)
 
     gpt_pending = {"result": None}
+
+    # ROI mode legend (top-left of ROI viewport)
+    roi_legend_actor = vtk.vtkTextActor()
+    roi_legend_actor.SetInput("")
+    roi_leg_tp = roi_legend_actor.GetTextProperty()
+    roi_leg_tp.SetFontFamilyToCourier()
+    roi_leg_tp.SetFontSize(11)
+    roi_leg_tp.SetColor(0.8, 0.8, 0.8)
+    roi_leg_tp.SetOpacity(0.7)
+    roi_leg_tp.SetJustificationToLeft()
+    roi_leg_tp.SetVerticalJustificationToTop()
+    roi_legend_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+    roi_legend_actor.GetPositionCoordinate().SetValue(0.02, 0.97)
+    ren_roi.AddActor(roi_legend_actor)
+
+    # Static legend for ROI viewport (bottom-left)
+    add_window_legend(ren_roi, [
+        "V  switch view mode",
+    ], font_px=11)
+
+    def _update_roi_legend():
+        if roi_flow_dots.is_active():
+            roi_legend_actor.SetInput(
+                "PARTICLE FLOW\n"
+                "Particles: donor -> receiver\n"
+                "Burst mode | V to switch")
+        elif roi_path_anim.is_active():
+            roi_legend_actor.SetInput(
+                "PATH ANIMATION\n"
+                "Flipping START <-> END\n"
+                "V to switch view")
+        elif roi_path_compare.is_active():
+            roi_legend_actor.SetInput(
+                "PATH COMPARISON\n"
+                "Cyan=A  Magenta=B")
+        else:
+            roi_legend_actor.SetInput("")
+
+    # LLM result text panel in the ROI viewport (bottom, green text)
+    gpt_text_actor = vtk.vtkTextActor()
+    gpt_text_actor.SetInput("")
+    gpt_tp = gpt_text_actor.GetTextProperty()
+    gpt_tp.SetFontFamilyToCourier()
+    gpt_tp.SetFontSize(11)
+    gpt_tp.SetColor(0.3, 0.9, 0.3)  # green
+    gpt_tp.SetOpacity(0.9)
+    gpt_tp.SetJustificationToLeft()
+    gpt_tp.SetVerticalJustificationToBottom()
+    gpt_text_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+    gpt_text_actor.GetPositionCoordinate().SetValue(0.02, 0.02)
+    gpt_text_actor.VisibilityOff()
+    ren_roi.AddActor(gpt_text_actor)
+
+    def _word_wrap(text: str, width: int = 50, max_lines: int = 18) -> str:
+        """Word-wrap text to fit the ROI viewport."""
+        import textwrap
+        lines = []
+        for paragraph in text.split('\n'):
+            wrapped = textwrap.wrap(paragraph, width=width) or ['']
+            lines.extend(wrapped)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines - 1] + ['...']
+        return '\n'.join(lines)
 
     # ---------- Helper: remove trail ----------
     def _remove_trail():
@@ -651,6 +1070,8 @@ def main():
 
         roi_panel.update_values(probe_start_roi[0])
         roi_flow_dots.stop()
+        roi_path_anim.stop()
+        roi_path_compare.stop()
         _remove_trail()
 
         probe_sphere.SetCenter(*pos)
@@ -673,17 +1094,22 @@ def main():
         end_roi = knn.query(probe_pos[0])
         delta = analyzer.compute_delta(probe_start_roi[0], end_roi)
 
-        roi_panel.update_values(delta)
-
         overlay.add_log("Probe frozen — asking LLM...")
         print("[probe] frozen, computing ROI delta...")
 
         context = analyzer.build_llm_context(delta)
         print(f"\n{context}\n")
 
-        # Start ROI flow animation
-        roi_flow_dots.start_from_delta(delta)
-        roi_panel.dim_spheres(0.15)
+        # Start ROI animation (path mode or particle mode)
+        if roi_anim_mode[0] == "path":
+            roi_flow_dots.stop()
+            roi_path_anim.build_from_path(probe_path, n_samples=60)
+        else:
+            roi_path_anim.stop()
+            roi_panel.update_values(delta)
+            roi_flow_dots.start_from_delta(delta)
+            roi_panel.dim_spheres(0.15)
+        _update_roi_legend()
 
         # Rebuild trail as smooth spline now that path is complete
         _rebuild_trail()
@@ -693,6 +1119,27 @@ def main():
 
         t = threading.Thread(target=_gpt_worker, daemon=True)
         t.start()
+
+    # ---------- Helper: reset probe (keep saved paths) ----------
+    def _reset_probe():
+        probe_mode[0] = None
+        probe_frozen[0] = False
+        probe_pos[0] = None
+        probe_path.clear()
+        probe_start_roi[0] = None
+        probe_actor.VisibilityOff()
+        _remove_trail()
+        roi_panel.reset_colors()
+        roi_panel.restore_spheres()
+        roi_flow_dots.stop()
+        roi_path_anim.stop()
+        roi_path_compare.stop()
+        roi_legend_actor.SetInput("")
+        gpt_text_actor.SetInput("")
+        gpt_text_actor.VisibilityOff()
+        overlay.clear_log()
+        overlay.hide_gpt()
+        gpt_pending["result"] = None
 
     # ---------- Helper: clear ----------
     def _clear_all():
@@ -706,8 +1153,18 @@ def main():
         roi_panel.reset_colors()
         roi_panel.restore_spheres()
         roi_flow_dots.stop()
+        roi_path_anim.stop()
+        roi_path_compare.stop()
+        # Remove saved path trails
+        for k in ("A", "B"):
+            if saved_trail_actors[k] is not None:
+                ren_manifold.RemoveActor(saved_trail_actors[k])
+                saved_trail_actors[k] = None
         overlay.clear_log()
         overlay.hide_gpt()
+        gpt_text_actor.SetInput("")
+        gpt_text_actor.VisibilityOff()
+        roi_legend_actor.SetInput("")
         gpt_pending["result"] = None
 
     # ---------- Callbacks ----------
@@ -723,12 +1180,12 @@ def main():
             overlay.add_log("Click to place probe (flow mode)")
 
         elif key == "m" and not shift:
-            if probe_mode[0] == "manual" and not probe_frozen[0]:
-                # Already in manual mode — next click extends path
+            if probe_mode[0] == "manual" and not probe_frozen[0] and probe_pos[0] is not None:
+                # Already in manual mode with active probe — extend path
                 placement_mode[0] = "manual_extend"
                 overlay.add_log("Click to add path point")
             else:
-                # Enter manual placement mode — next click places probe
+                # Start new manual path
                 placement_mode[0] = "manual"
                 overlay.add_log("Click to place probe (manual mode)")
 
@@ -745,6 +1202,101 @@ def main():
         elif key == "minus":
             speed_scale[0] /= 1.25
             overlay.add_log(f"Speed: {speed_scale[0]:.2f}")
+
+        elif key == "v" and not shift:
+            # Toggle between path animation and particle flow mode
+            if roi_anim_mode[0] == "path":
+                roi_anim_mode[0] = "particles"
+                overlay.add_log("ROI mode: particles")
+            else:
+                roi_anim_mode[0] = "path"
+                overlay.add_log("ROI mode: path animation")
+            # If frozen, restart with new mode
+            if probe_frozen[0] and probe_pos[0] is not None:
+                end_roi = knn.query(probe_pos[0])
+                delta = analyzer.compute_delta(probe_start_roi[0], end_roi)
+                if roi_anim_mode[0] == "path":
+                    roi_flow_dots.stop()
+                    roi_panel.restore_spheres()
+                    roi_path_anim.build_from_path(probe_path, n_samples=60)
+                else:
+                    roi_path_anim.stop()
+                    roi_panel.update_values(delta)
+                    roi_flow_dots.start_from_delta(delta)
+                    roi_panel.dim_spheres(0.15)
+                _update_roi_legend()
+
+        elif key == "1" and not shift:
+            # Save current path as Path A, then reset probe for next path
+            if len(probe_path) >= 2:
+                saved_paths["A"] = [p.copy() for p in probe_path]
+                overlay.add_log(f"Path A saved ({len(probe_path)} pts)")
+                print(f"[compare] Path A saved: {len(probe_path)} points")
+                if saved_trail_actors["A"] is not None:
+                    ren_manifold.RemoveActor(saved_trail_actors["A"])
+                ta = _build_spline_trail(np.array(probe_path, np.float32), diag)
+                if ta is not None:
+                    ta.GetProperty().SetColor(0.0, 0.9, 0.9)  # cyan
+                    ta.GetProperty().SetOpacity(0.6)
+                    ren_manifold.AddActor(ta)
+                    saved_trail_actors["A"] = ta
+                # Reset probe so next path starts fresh
+                _reset_probe()
+            else:
+                overlay.add_log("Need a path first (place+freeze probe)")
+
+        elif key == "2" and not shift:
+            # Save current path as Path B, then reset probe for next path
+            if len(probe_path) >= 2:
+                saved_paths["B"] = [p.copy() for p in probe_path]
+                overlay.add_log(f"Path B saved ({len(probe_path)} pts)")
+                print(f"[compare] Path B saved: {len(probe_path)} points")
+                if saved_trail_actors["B"] is not None:
+                    ren_manifold.RemoveActor(saved_trail_actors["B"])
+                tb = _build_spline_trail(np.array(probe_path, np.float32), diag)
+                if tb is not None:
+                    tb.GetProperty().SetColor(0.9, 0.0, 0.9)  # magenta
+                    tb.GetProperty().SetOpacity(0.6)
+                    ren_manifold.AddActor(tb)
+                    saved_trail_actors["B"] = tb
+                _reset_probe()
+            else:
+                overlay.add_log("Need a path first (place+freeze probe)")
+
+        elif key == "d" and not shift:
+            # Compare Path A vs Path B with LLM analysis
+            if saved_paths["A"] is None or saved_paths["B"] is None:
+                overlay.add_log("Save Path A (1) and Path B (2) first")
+            else:
+                roi_flow_dots.stop()
+                roi_path_anim.stop()
+                roi_panel.restore_spheres()
+                roi_path_compare.build(saved_paths["A"], saved_paths["B"])
+                overlay.add_log("Comparing Path A (cyan) vs B (magenta)...")
+                print("[compare] Started path comparison animation")
+
+                # Compute deltas and LLM context for both paths
+                pa, pb = saved_paths["A"], saved_paths["B"]
+                roi_start_a = knn.query(np.array(pa[0], np.float32))
+                roi_end_a = knn.query(np.array(pa[-1], np.float32))
+                delta_a = analyzer.compute_delta(roi_start_a, roi_end_a)
+                ctx_a = analyzer.build_llm_context(delta_a)
+
+                roi_start_b = knn.query(np.array(pb[0], np.float32))
+                roi_end_b = knn.query(np.array(pb[-1], np.float32))
+                delta_b = analyzer.compute_delta(roi_start_b, roi_end_b)
+                ctx_b = analyzer.build_llm_context(delta_b)
+
+                print(f"\n--- PATH A ---\n{ctx_a}\n--- PATH B ---\n{ctx_b}\n")
+
+                # LLM comparison in background
+                def _compare_worker():
+                    gpt_pending["result"] = llm.compare_two_paths(ctx_a, ctx_b)
+
+                t = threading.Thread(target=_compare_worker, daemon=True)
+                t.start()
+                overlay.add_log("Asking LLM to compare paths...")
+                _update_roi_legend()
 
         elif key in ("q", "Escape"):
             iren.TerminateApp()
@@ -789,6 +1341,9 @@ def main():
             gpt_pending["result"] = None
             overlay.show_gpt(text)
             overlay.add_log("LLM interpretation ready.")
+            # Show in ROI viewport as well
+            gpt_text_actor.SetInput(_word_wrap(text, width=45, max_lines=16))
+            gpt_text_actor.VisibilityOn()
             print(f"\n--- ROI FLOW INTERPRETATION ---\n{text}\n--- END ---\n")
 
         # Advect particles
@@ -842,9 +1397,13 @@ def main():
                 roi_vec = knn.query(pos)
                 roi_panel.update_values(roi_vec)
 
-        # Tick ROI flow animation
+        # Tick ROI animation (path, particles, or compare — whichever is active)
+        if roi_path_anim.is_active():
+            roi_path_anim.tick()
         if roi_flow_dots.is_active():
             roi_flow_dots.tick()
+        if roi_path_compare.is_active():
+            roi_path_compare.tick()
 
         win.Render()
 
@@ -859,7 +1418,10 @@ def main():
     print("  G then click  — place probe (follows flow)")
     print("  M then click  — manual path mode (click to extend)")
     print("  Shift+G       — freeze & interpret ROI flow")
-    print("  C             — clear probe & flow particles")
+    print("  V             — toggle ROI anim: path ↔ particles")
+    print("  1 / 2         — save current path as A / B")
+    print("  D             — compare Path A vs Path B")
+    print("  C             — clear all")
     print("  +/-           — speed scale")
     print("  Q             — quit")
     print("=" * 40)
